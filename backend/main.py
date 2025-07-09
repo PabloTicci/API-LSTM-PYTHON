@@ -11,14 +11,14 @@ from sklearn.linear_model import LinearRegression
 
 app = FastAPI()
 
-# Parámetro de ventana
+
 N = 3
 
-# Ruta para guardar el modelo
+
 output_dir = 'ml_model'
 os.makedirs(output_dir, exist_ok=True)
 
-# Definición del modelo de datos que se espera
+
 class ImpresoraData(BaseModel):
     id: int
     series: List[float]
@@ -27,12 +27,12 @@ class ImpresoraData(BaseModel):
 @app.post("/predecir")
 def predecir(data: ImpresoraData):
     try:
-        # Verifica que exista el modelo entrenado
+       
         model_path = os.path.join(output_dir, 'modelo_entrenado.pkl')
         if not os.path.exists(model_path):
             raise HTTPException(status_code=404, detail="Modelo no encontrado. Entrena primero el modelo.")
 
-        # Cargar modelo entrenado y parámetros
+        
         model_data = joblib.load(model_path)
         modelo = model_data['model']
         global_min = model_data['global_min']
@@ -41,18 +41,18 @@ def predecir(data: ImpresoraData):
 
         serie = np.array(data.series, dtype=float)
 
-        # Validar longitud suficiente
-        if len(serie) < N:
-            raise HTTPException(status_code=400, detail=f"Se requieren al menos {N} valores para predecir.")
+        
+        if len(serie) <= N:
+            raise HTTPException(status_code=400, detail=f"Se requieren al menos {N+1} valores para predecir usando todos menos el último.")
 
-        # Normalizar los últimos N valores
-        serie_norm = (serie - global_min) / (global_max - global_min) if global_max != global_min else serie
-        entrada = serie_norm[-N:]  # Últimos N valores
+        serie_para_prediccion = serie[:-1]  # Excluye el último
+        serie_norm = (serie_para_prediccion - global_min) / (global_max - global_min) if global_max != global_min else serie_para_prediccion
 
-        # Hacer predicción
+        entrada = serie_norm[-N:]  
+        
         pred_norm = modelo.predict([entrada])[0]
 
-        # Desnormalizar
+        
         pred = pred_norm * (global_max - global_min) + global_min if global_max != global_min else pred_norm
 
         return {
@@ -65,10 +65,11 @@ def predecir(data: ImpresoraData):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/entrenar")
 def entrenar_modelo(data: List[ImpresoraData]):
     try:
-        # Recolectar todos los datos para normalizar
+        
         all_series_values = []
         for impresora in data:
             if isinstance(impresora.series, list):
