@@ -6,16 +6,14 @@ from typing import List
 import numpy as np
 import joblib
 import os
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
 
+from sklearn.linear_model import LinearRegression
 
 app = FastAPI()
 
-# N ahora representará la cantidad de pasos de tiempo (timesteps) para la entrada LSTM.
-# Es decir, cuántos valores anteriores usamos para predecir el siguiente.
+
 N = 3
+
 
 output_dir = 'ml_model'
 os.makedirs(output_dir, exist_ok=True)
@@ -29,51 +27,39 @@ class ImpresoraData(BaseModel):
 @app.post("/predecir")
 def predecir(data: ImpresoraData):
     try:
-        # Cargar el modelo y los parámetros de normalización
-        model_path = os.path.join(output_dir, 'modelo_entrenado_lstm.pkl')
+       
+        model_path = os.path.join(output_dir, 'modelo_entrenado.pkl')
         if not os.path.exists(model_path):
-            raise HTTPException(status_code=404, detail="Modelo LSTM no encontrado. Entrena primero el modelo LSTM.")
+            raise HTTPException(status_code=404, detail="Modelo no encontrado. Entrena primero el modelo.")
 
+        
         model_data = joblib.load(model_path)
         modelo = model_data['model']
         global_min = model_data['global_min']
         global_max = model_data['global_max']
-        N_loaded = model_data['N'] # Usamos N_loaded para mayor claridad
+        N = model_data['N']
 
         serie = np.array(data.series, dtype=float)
 
-        # Validar longitud de la serie para predicción
-        if len(serie) < N_loaded:
-            raise HTTPException(status_code=400, detail=f"Se requieren al menos {N_loaded} valores para predecir.")
+        
+        if len(serie) <= N:
+            raise HTTPException(status_code=400, detail=f"Se requieren al menos {N+1} valores para predecir usando todos menos el último.")
 
-        # Normalizar la serie de entrada
-        # Asegurarse de que global_max - global_min no sea cero para evitar división por cero
-        if global_max == global_min:
-            # Si todos los valores son iguales, la normalización no es necesaria o implicaría una división por cero
-            # En este caso, la serie_norm será igual a la serie_para_prediccion si el rango es 0
-            serie_norm = serie
-        else:
-            serie_norm = (serie - global_min) / (global_max - global_min)
+        serie_para_prediccion = serie[:-1]  # Excluye el último
+        serie_norm = (serie_para_prediccion - global_min) / (global_max - global_min) if global_max != global_min else serie_para_prediccion
 
-        # La entrada para el LSTM debe tener la forma (muestras, timesteps, características)
-        # En nuestro caso, (1, N, 1) porque tenemos una sola muestra, N timesteps y una característica por timestep.
-        entrada = serie_norm[-N_loaded:].reshape(1, N_loaded, 1)
+        entrada = serie_norm[-N:]  
+        
+        pred_norm = modelo.predict([entrada])[0]
 
-        # Realizar la predicción
-        pred_norm = modelo.predict(entrada)[0][0] # El output es (1,1), tomamos el primer elemento
-
-        # Desnormalizar la predicción
-        if global_max == global_min:
-            # Si los valores originales eran todos iguales, la predicción será el mismo valor
-            pred = pred_norm
-        else:
-            pred = pred_norm * (global_max - global_min) + global_min
+        
+        pred = pred_norm * (global_max - global_min) + global_min if global_max != global_min else pred_norm
 
         return {
             "id_impresora": data.id,
-            "entrada_usada_normalizada": serie_norm[-N_loaded:].tolist(),
-            "prediccion_normalizada": float(pred_norm), # Convertir a float para JSON
-            "prediccion_real": float(pred) # Convertir a float para JSON
+            "entrada_usada": entrada.tolist(),
+            "prediccion_normalizada": pred_norm,
+            "prediccion_real": pred
         }
 
     except Exception as e:
@@ -81,8 +67,9 @@ def predecir(data: ImpresoraData):
 
 
 @app.post("/entrenar")
-def entrenar_modelo_lstm(data: List[ImpresoraData]):
+def entrenar_modelo(data: List[ImpresoraData]):
     try:
+        
         all_series_values = []
         for impresora in data:
             if isinstance(impresora.series, list):
@@ -97,17 +84,11 @@ def entrenar_modelo_lstm(data: List[ImpresoraData]):
         global_min = all_series_values.min()
         global_max = all_series_values.max()
 
-        # Preparar los datos para LSTM
-        # Las entradas (X) serán secuencias de N valores, y la salida (y) será el valor siguiente
         X, y = [], []
 
         for impresora in data:
             serie = np.array(impresora.series, dtype=float)
-            
-            if global_max == global_min:
-                serie_norm = serie # No se normaliza si el rango es cero
-            else:
-                serie_norm = (serie - global_min) / (global_max - global_min)
+            serie_norm = (serie - global_min) / (global_max - global_min) if global_max != global_min else serie
 
             if len(serie_norm) >= N + 1:
                 for i in range(len(serie_norm) - N):
@@ -115,23 +96,13 @@ def entrenar_modelo_lstm(data: List[ImpresoraData]):
                     y.append(serie_norm[i+N])
 
         if not X:
-            raise HTTPException(status_code=400, detail=f"No hay suficientes datos después de procesar las secuencias. Se requieren al menos {N+1} puntos por serie.")
+            raise HTTPException(status_code=400, detail="No hay suficientes datos después de procesar las secuencias")
 
         X = np.array(X)
         y = np.array(y)
 
-        # Redimensionar X para el formato LSTM: (muestras, timesteps, características)
-        # En este caso, 1 característica por timestep
-        X = X.reshape(X.shape[0], X.shape[1], 1)
-
-        # Definir el modelo LSTM
-        modelo = Sequential()
-        modelo.add(LSTM(50, activation='relu', input_shape=(N, 1))) # 50 unidades LSTM, relu para activación, input_shape (timesteps, features)
-        modelo.add(Dense(1)) # Una única salida para la predicción del siguiente valor
-        modelo.compile(optimizer='adam', loss='mse') # Optimizador Adam, Mean Squared Error como función de pérdida
-
-        # Entrenar el modelo
-        modelo.fit(X, y, epochs=100, verbose=0) # Entrenar por 100 épocas, no mostrar el progreso
+        modelo = LinearRegression()
+        modelo.fit(X, y)
 
         model_data = {
             'model': modelo,
@@ -140,18 +111,14 @@ def entrenar_modelo_lstm(data: List[ImpresoraData]):
             'N': N
         }
 
-        # Guardar el modelo Keras con joblib
-        # TensorFlow/Keras models se guardan de forma diferente, pero joblib puede serializar el objeto completo.
-        # Sin embargo, una práctica más robusta sería guardar el modelo Keras directamente con modelo.save()
-        # Para mantener la simplicidad y consistencia con tu enfoque anterior de joblib:
-        joblib.dump(model_data, os.path.join(output_dir, 'modelo_entrenado_lstm.pkl'))
+        joblib.dump(model_data, os.path.join(output_dir, 'modelo_entrenado.pkl'))
 
         return {
-            "mensaje": "Modelo LSTM entrenado y guardado exitosamente.",
+            "mensaje": "Modelo entrenado y guardado exitosamente.",
             "datos_entrenamiento": {
                 "series_total": len(all_series_values),
                 "secuencias": len(X),
-                "modelo_path": os.path.join(output_dir, 'modelo_entrenado_lstm.pkl')
+                "modelo_path": os.path.join(output_dir, 'modelo_entrenado.pkl')
             }
         }
 
