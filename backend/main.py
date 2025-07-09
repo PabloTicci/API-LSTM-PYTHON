@@ -80,7 +80,7 @@ def predecir(data: ImpresoraData):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/entrenar_lstm")
+@app.post("/entrenar")
 def entrenar_modelo_lstm(data: List[ImpresoraData]):
     try:
         all_series_values = []
